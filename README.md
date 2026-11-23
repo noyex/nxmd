@@ -2,14 +2,16 @@
 
 A tiny, native Markdown viewer for macOS. Double-click a `.md` file and read it, nicely rendered.
 
-- Clean typography, follows light and dark mode
+- Pure black, distraction-free reading with the Geist and Geist Mono typefaces
+- Floating toolbar: outline, find, text size, Markdown source, open in your editor. It hides while you scroll down
+- Smooth mouse-wheel scrolling and a thin reading-progress line under the title
 - GitHub-flavored Markdown: tables, task lists, strikethrough, autolinks
 - Syntax highlighting for code blocks
 - Live reload: the page updates the moment the file changes on disk, scroll position kept
 - Relative images and links to other `.md` files work
-- Find (⌘F), zoom (⌘+ / ⌘- / ⌘0), print and export to PDF (⌘P)
+- Shortcuts: find ⌘F, outline ⇧⌘O, source ⌥⌘U, open in editor ⇧⌘E, text size ⌘+ / ⌘- / ⌘0, print and PDF ⌘P
 - Safe: scripts inside Markdown never run
-- Under 1 MB, no Electron
+- About 1 MB, no Electron
 
 ## Install
 
@@ -36,4 +38,4 @@ An AppKit document app with a `WKWebView`. Markdown is converted to HTML by [mar
 
 ## License
 
-MIT. Bundles marked (MIT) and highlight.js (BSD-3-Clause).
+MIT. Bundles marked (MIT), highlight.js (BSD-3-Clause) and the Geist fonts (SIL Open Font License, see `Resources/fonts/OFL.txt`).
