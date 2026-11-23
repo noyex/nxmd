@@ -55,6 +55,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
         config.userContentController.addUserScript(WKUserScript(
             source: Self.scrollScript, injectionTime: .atDocumentEnd,
             forMainFrameOnly: true, in: Self.world))
+        CodeCopy.install(in: config.userContentController, world: Self.world)
 
         dock = Dock()
         super.init(window: window)

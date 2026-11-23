@@ -3,6 +3,14 @@
   var seen = {};
   var headings = [];
 
+  // Clicks are handled by the app's own script (CodeCopy.swift), not by the page.
+  var COPY_BUTTON =
+    '<button class="copy" type="button" title="Copy" aria-label="Copy code">' +
+    '<svg class="icon-copy" viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/>' +
+    '<path d="M10.5 5.5V3.75c0-.69-.56-1.25-1.25-1.25h-5.5c-.69 0-1.25.56-1.25 1.25v5.5c0 .69.56 1.25 1.25 1.25H5.5"/></svg>' +
+    '<svg class="icon-check" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-6.5"/></svg>' +
+    '</button>';
+
   function escapeHtml(s) {
     return s
       .replace(/&/g, '&amp;')
@@ -55,7 +63,7 @@
         }
         if (body === null) body = escapeHtml(token.text);
         var cls = lang ? ' class="language-' + escapeHtml(lang) + '"' : '';
-        return '<pre><code' + cls + '>' + body + '</code></pre>\n';
+        return '<div class="code-block"><pre><code' + cls + '>' + body + '</code></pre>' + COPY_BUTTON + '</div>\n';
       }
     }
   });
