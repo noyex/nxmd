@@ -47,6 +47,8 @@ final class ToolButton: NSButton {
                                        owner: self))
     }
 
+    override func viewDidHide() { hovering = false }
+    override func viewDidUnhide() { hovering = false }
     override func mouseEntered(with event: NSEvent) { hovering = true }
     override func mouseExited(with event: NSEvent) { hovering = false }
 
@@ -225,12 +227,15 @@ final class ContainerView: NSView {
 /// Mouse wheels scroll in coarse steps in WebKit. Hand them to `onWheel` to animate;
 /// trackpads (precise deltas with native momentum) pass through untouched.
 final class SmoothWebView: WKWebView {
-    var onWheel: ((CGFloat) -> Bool)?
+    /// Vertical delta and the cursor position in top-left view coordinates.
+    var onWheel: ((CGFloat, NSPoint) -> Bool)?
 
     override func scrollWheel(with event: NSEvent) {
         let plain = event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty
+        var point = convert(event.locationInWindow, from: nil)
+        if !isFlipped { point.y = bounds.height - point.y }
         if !event.hasPreciseScrollingDeltas, plain, event.scrollingDeltaY != 0,
-           let onWheel, onWheel(event.scrollingDeltaY) {
+           let onWheel, onWheel(event.scrollingDeltaY, point) {
             return
         }
         super.scrollWheel(with: event)

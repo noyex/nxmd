@@ -21,7 +21,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
     private var headings: [Heading] = []
     private var showingSource = false
     private var lastScrollY: Double = 0
-    private var scrollMax: Double = 0
+    private var scrollRun: Double = 0 // distance scrolled in the current direction
 
     init() {
         let window = NSWindow(
@@ -63,9 +63,14 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
         window.delegate = self
         webView.navigationDelegate = self
         webView.uiDelegate = self
-        webView.onWheel = { [weak self] delta in
+        webView.onWheel = { [weak self] delta, point in
             guard let self, self.pageLoaded, !Theme.reduceMotion else { return false }
-            self.runScript("nxmdWheel(dy)", ["dy": Double(delta) * 50])
+            let zoom = self.webView.pageZoom
+            self.runScript("nxmdWheel(dy, x, y)", [
+                "dy": Double(delta) * 50,
+                "x": Double(point.x) / zoom,
+                "y": Double(point.y) / zoom,
+            ])
             return true
         }
         for button in [dock.outline, dock.search, dock.zoom, dock.source, dock.edit] { button.target = self }
@@ -177,7 +182,9 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
     }
 
     private func runScript(_ source: String, _ arguments: [String: Any] = [:]) {
-        webView.callAsyncJavaScript(source, arguments: arguments, in: nil, in: Self.world) { _ in }
+        webView.callAsyncJavaScript(source, arguments: arguments, in: nil, in: Self.world) { result in
+            if case .failure(let error) = result { NSLog("nxmd script error: \(error)") }
+        }
     }
 
     // MARK: - Scroll: progress line and toolbar auto-hide
@@ -198,42 +205,76 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
       nxmdReport();
 
       // Smooth mouse-wheel scrolling: ease toward a target position.
-      var target = null, frame = 0;
+      var target = null, frame = 0, lastSet = null;
+      function root() { return document.scrollingElement || document.documentElement; }
+      function stop() {
+        if (frame) cancelAnimationFrame(frame);
+        target = null; frame = 0; lastSet = null;
+      }
       function step() {
-        var el = document.scrollingElement || document.documentElement;
+        var el = root();
+        target = Math.max(0, Math.min(el.scrollHeight - el.clientHeight, target));
         var diff = target - el.scrollTop;
         if (Math.abs(diff) < 1.5) {
           el.scrollTo({ top: target, behavior: 'instant' });
-          target = null; frame = 0;
+          stop();
           return;
         }
         // Ease out, but always move at least 1px so rounding can't stall it.
         var move = Math.sign(diff) * Math.max(Math.abs(diff) * 0.2, 1);
-        el.scrollTo({ top: el.scrollTop + move, behavior: 'instant' });
+        var before = el.scrollTop;
+        el.scrollTo({ top: before + move, behavior: 'instant' });
+        if (el.scrollTop === before) { stop(); return; } // can't move any further
+        lastSet = el.scrollTop;
         frame = requestAnimationFrame(step);
       }
-      globalThis.nxmdWheel = function (dy) {
-        var el = document.scrollingElement || document.documentElement;
-        var max = el.scrollHeight - el.clientHeight;
+      // Any scroll we didn't make (keyboard, trackpad, find, links) cancels the animation.
+      addEventListener('scroll', function () {
+        if (target !== null && lastSet !== null && Math.abs(root().scrollTop - lastSet) > 2) stop();
+      }, { passive: true });
+      globalThis.nxmdStopSmooth = stop;
+
+      // Nearest inner box under the cursor that can still scroll in this direction.
+      function innerScrollable(x, y, dy) {
+        var el = document.elementFromPoint(x, y);
+        while (el && el !== document.body && el !== document.documentElement) {
+          var overflow = getComputedStyle(el).overflowY;
+          if ((overflow === 'auto' || overflow === 'scroll') && el.scrollHeight > el.clientHeight) {
+            var canUp = el.scrollTop > 0;
+            var canDown = el.scrollTop + el.clientHeight < el.scrollHeight - 1;
+            if ((dy > 0 && canUp) || (dy < 0 && canDown)) return el;
+          }
+          el = el.parentElement;
+        }
+        return null;
+      }
+
+      globalThis.nxmdWheel = function (dy, x, y) {
+        var inner = innerScrollable(x, y, dy);
+        if (inner) { inner.scrollBy({ top: -dy, behavior: 'smooth' }); return; }
+        var el = root();
         if (target === null) target = el.scrollTop;
-        target = Math.max(0, Math.min(max, target - dy));
+        target = Math.max(0, Math.min(el.scrollHeight - el.clientHeight, target - dy));
         if (!frame) frame = requestAnimationFrame(step);
       };
     })();
     """
 
     fileprivate func pageScrolled(y: Double, max: Double) {
-        scrollMax = max
         topBar.setProgress(max > 1 ? CGFloat(y / max) : nil)
 
         let delta = y - lastScrollY
         lastScrollY = y
+        if delta != 0 {
+            // Reset when the direction changes, so slow scrolls add up too.
+            scrollRun = (scrollRun >= 0) == (delta >= 0) ? scrollRun + delta : delta
+        }
         guard !dock.isSearching else { return }
         let nearTop = y < 40
         let nearBottom = y > max - 8
-        if nearTop || nearBottom || delta < -6 {
+        if nearTop || nearBottom || scrollRun < -24 {
             setDockVisible(true)
-        } else if delta > 6 {
+        } else if scrollRun > 24 {
             setDockVisible(false)
         }
     }
@@ -259,6 +300,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
 
     @objc func showOutline(_ sender: Any?) {
         guard !headings.isEmpty else { return }
+        setDockVisible(true)
         let menu = NSMenu()
         let minLevel = headings.map(\.level).min() ?? 1
         for heading in headings where heading.level <= minLevel + 2 {
@@ -273,7 +315,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
 
     @objc private func jumpToHeading(_ item: NSMenuItem) {
         guard let id = item.representedObject as? String else { return }
-        runScript("document.getElementById(id)?.scrollIntoView({ block: 'start' })", ["id": id])
+        runScript("nxmdStopSmooth(); document.getElementById(id)?.scrollIntoView({ block: 'start' })", ["id": id])
     }
 
     @objc func showZoomMenu(_ sender: Any?) {
@@ -295,7 +337,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
     @objc func toggleSource(_ sender: Any?) {
         showingSource.toggle()
         render()
-        runScript("window.scrollTo(0, 0)")
+        runScript("nxmdStopSmooth(); window.scrollTo(0, 0)")
     }
 
     @objc func openInEditor(_ sender: Any?) {
@@ -312,8 +354,11 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
         switch item.action {
         case #selector(toggleSource(_:)):
             item.title = showingSource ? "Show Rendered" : "Show Source"
+        case #selector(showOutline(_:)):
+            return !headings.isEmpty
         case #selector(openInEditor(_:)):
             if let editor = ExternalEditor.app { item.title = "Open in \(editor.name)" }
+            return markdownDocument?.fileURL != nil
         default:
             break
         }

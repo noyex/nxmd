@@ -245,6 +245,7 @@ pre::-webkit-scrollbar-thumb, table::-webkit-scrollbar-thumb { border-color: var
     --line: #ddd; --code-bg: #f5f5f5; --link: #0a58c2;
     --hl-keyword: #cf222e; --hl-string: #0a3069; --hl-comment: #6e7781;
     --hl-number: #0550ae; --hl-title: #8250df; --hl-builtin: #953800;
+    --mark: #fff3a8; --hl-add: #116329; --hl-del: #82071e;
   }
   body::after { display: none; }
   main { max-width: none; padding: 0; animation: none; }
