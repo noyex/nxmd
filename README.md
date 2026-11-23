@@ -6,7 +6,7 @@ A tiny, native Markdown viewer for macOS. Double-click a `.md` file and read it,
 - Floating toolbar: outline, find, text size, Markdown source, open in your editor. It hides while you scroll down
 - Smooth mouse-wheel scrolling and a thin reading-progress line under the title
 - GitHub-flavored Markdown: tables, task lists, strikethrough, autolinks
-- Syntax highlighting for code blocks
+- Syntax highlighting and a copy button for code blocks
 - Live reload: the page updates the moment the file changes on disk, scroll position kept
 - Relative images and links to other `.md` files work
 - Shortcuts: find ⌘F, outline ⇧⌘O, source ⌥⌘U, open in editor ⇧⌘E, text size ⌘+ / ⌘- / ⌘0, print and PDF ⌘P
