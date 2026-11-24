@@ -30,15 +30,18 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
         tabs.indices.contains(activeIndex) ? tabs[activeIndex] : nil
     }
 
-    /// The window a newly opened document joins.
+    /// The window a newly opened document joins, even when it is minimized or the app is hidden.
     static func forNewDocument() -> ViewerWindowController {
-        if let current, current.window?.isVisible == true || current.tabs.isEmpty {
-            return current
-        }
+        if let current { return current }
         let front = NSApp.orderedWindows.lazy
             .compactMap { $0.windowController as? ViewerWindowController }
-            .first { $0.window?.isVisible == true }
-        return front ?? ViewerWindowController()
+            .first
+        return front ?? all.last ?? ViewerWindowController()
+    }
+
+    /// The file shown in the main window, for NSDocumentController.currentDocument.
+    static var mainDocument: MarkdownDocument? {
+        (NSApp.mainWindow?.windowController as? ViewerWindowController)?.active?.document
     }
 
     init() {
@@ -179,28 +182,33 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
     /// Brings the document's tab and its window to the front.
     func show(_ tab: DocumentTab) {
         if let index = tabs.firstIndex(where: { $0 === tab }) { select(index) }
+        if window?.isMiniaturized == true { window?.deminiaturize(nil) }
         showWindow(nil)
     }
 
     func select(_ index: Int) {
         guard tabs.indices.contains(index) else { return }
         let tab = tabs[index]
-        if let old = active, old !== tab {
+        let old = active === tab ? nil : active
+        // Where the keyboard focus is, before hiding anything moves it.
+        let responder = window?.firstResponder
+        let focusInField = (responder as? NSText)?.delegate === dock.searchField
+        let focusInPage = old.map { (responder as? NSView)?.isDescendant(of: $0.webView) ?? false } ?? false
+        if let old {
             old.findText = dock.searchField.stringValue
             old.isSearching = dock.isSearching
-            let hadFocus = (window?.firstResponder as? NSView)?.isDescendant(of: old.webView) ?? false
-            old.webView.isHidden = true
-            if hadFocus { window?.makeFirstResponder(tab.webView) }
         }
+
         activeIndex = index
         tab.webView.isHidden = false
+        old?.webView.isHidden = true
 
         dock.searchField.stringValue = tab.findText
         dock.searchField.textColor = .labelColor
+        if focusInField, !tab.isSearching { window?.makeFirstResponder(tab.webView) }
         dock.setSearching(tab.isSearching, animated: false)
-        if window?.firstResponder == nil || window?.firstResponder === window {
-            window?.makeFirstResponder(tab.webView)
-        }
+        let lostFocus = window?.firstResponder == nil || window?.firstResponder === window
+        if focusInPage || lostFocus { window?.makeFirstResponder(tab.webView) }
 
         tabBar.select(index)
         showProgress(of: tab)
@@ -251,12 +259,14 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
         select((activeIndex - 1 + tabs.count) % tabs.count)
     }
 
+    /// Returns false when the shortcut does not apply, so the key works as usual.
     private func handle(_ shortcut: TabShortcut) -> Bool {
+        guard tabs.count > 1 else { return false }
         switch shortcut {
         case .next: showNextTab(nil)
         case .previous: showPreviousTab(nil)
         case .index(let index):
-            guard tabs.indices.contains(index) else { return true }
+            guard tabs.indices.contains(index) else { return false }
             select(index)
         case .last: select(tabs.count - 1)
         }
@@ -476,10 +486,16 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
     @objc func zoomOut(_ sender: Any?) { setZoom(zoom / 1.1) }
     @objc func resetZoom(_ sender: Any?) { setZoom(1) }
 
+    /// Text size is one preference for the whole app.
     private func setZoom(_ value: Double) {
-        zoom = min(max(value, 0.5), 3)
-        tabs.forEach { $0.webView.pageZoom = zoom }
+        let zoom = min(max(value, 0.5), 3)
         UserDefaults.standard.set(zoom, forKey: Self.zoomKey)
+        Self.all.forEach { $0.apply(zoom: zoom) }
+    }
+
+    private func apply(zoom: Double) {
+        self.zoom = zoom
+        tabs.forEach { $0.webView.pageZoom = zoom }
         updateZoomLabel()
     }
 

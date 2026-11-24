@@ -286,6 +286,10 @@ final class TabBar: NSView {
         }
     }
 
+    fileprivate func pressed(_ item: TabItemView) {
+        if let index = items.firstIndex(of: item), index != selectedIndex { onSelect?(index) }
+    }
+
     fileprivate func close(_ item: TabItemView) {
         guard drag == nil, let index = items.firstIndex(of: item) else { return }
         onClose?(index)
@@ -355,6 +359,7 @@ private final class TabItemView: NSView {
     private func updateAccessibility() {
         setAccessibilityLabel(title)
         setAccessibilityValue(isSelected)
+        closeButton.setAccessibilityLabel("Close \(title)")
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -423,6 +428,11 @@ private final class TabItemView: NSView {
         hovering = bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil))
     }
 
+    override func accessibilityPerformPress() -> Bool {
+        bar?.pressed(self)
+        return true
+    }
+
     override func mouseDown(with event: NSEvent) { bar?.itemMouseDown(self, with: event) }
     override func mouseDragged(with event: NSEvent) { bar?.itemMouseDragged(self, with: event) }
     override func mouseUp(with event: NSEvent) { bar?.itemMouseUp(self) }
@@ -444,6 +454,14 @@ private final class TabCloseButton: NSView {
     var onClick: (() -> Void)?
     private var hovering = false { didSet { needsDisplay = true } }
     private var pressed = false { didSet { needsDisplay = true } }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+
+    override func accessibilityPerformPress() -> Bool {
+        onClick?()
+        return true
+    }
 
     override var isFlipped: Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }
@@ -507,6 +525,8 @@ private final class FrameAnimator {
 
     private var running: [ObjectIdentifier: Animation] = [:]
     private var timer: Timer?
+
+    deinit { timer?.invalidate() }
 
     func animate(_ view: NSView, to frame: NSRect, alpha: CGFloat? = nil,
                  duration: CFTimeInterval = 0.2, completion: (() -> Void)? = nil) {

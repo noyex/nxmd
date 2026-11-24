@@ -4,6 +4,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var openedFiles = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        _ = DocumentController() // becomes NSDocumentController.shared
         Theme.registerFonts()
         NSWindow.allowsAutomaticWindowTabbing = false // nxmd draws its own tabs
         NSApp.appearance = NSAppearance(named: .darkAqua)
@@ -102,6 +103,14 @@ enum MainMenu {
         NSApp.windowsMenu = window
 
         return main
+    }
+}
+
+/// Documents have no window controllers (they live as tabs), so the current
+/// document comes from the main window's active tab. The Open panel starts next to it.
+final class DocumentController: NSDocumentController {
+    override var currentDocument: NSDocument? {
+        ViewerWindowController.mainDocument ?? super.currentDocument
     }
 }
 
