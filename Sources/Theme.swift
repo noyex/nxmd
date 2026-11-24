@@ -8,6 +8,13 @@ enum Theme {
     static let hover = NSColor(white: 0.15, alpha: 1)
     static let border = NSColor(white: 0.17, alpha: 1)
     static let dockFill = NSColor(white: 0.085, alpha: 0.92)
+    static let progress = NSColor(white: 0.6, alpha: 1)
+
+    static let tabLine = NSColor(white: 0.133, alpha: 1)
+    static let tabOutline = NSColor(white: 0.15, alpha: 1)
+    static let tabHover = NSColor(white: 0.055, alpha: 1)
+    static let tabHoverText = NSColor(white: 0.79, alpha: 1)
+    static let tabCloseHover = NSColor(white: 0.165, alpha: 1)
 
     static func registerFonts() {
         guard let dir = Bundle.main.resourceURL?.appendingPathComponent("fonts") else { return }
