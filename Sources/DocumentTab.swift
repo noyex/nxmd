@@ -46,6 +46,7 @@ final class DocumentTab: NSObject, WKNavigationDelegate, WKUIDelegate {
         config.userContentController.addUserScript(WKUserScript(
             source: Self.scrollScript, injectionTime: .atDocumentEnd,
             forMainFrameOnly: true, in: Self.world))
+        CodeCopy.install(in: config.userContentController, world: Self.world)
 
         super.init()
 
