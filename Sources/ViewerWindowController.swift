@@ -1,30 +1,48 @@
 import AppKit
 import WebKit
 
+/// A viewer window. Holds one or more files as tabs; with a single file it shows
+/// just the centered title, from two on the title bar turns into a tab bar.
 final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation,
-    NSSearchFieldDelegate, WKNavigationDelegate, WKUIDelegate {
+    NSSearchFieldDelegate {
     private static let frameName = "NxmdViewer"
     private static let zoomKey = "pageZoom"
     private static let zoomLevels: [Double] = [0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2]
-    private static let markdownExtensions: Set<String> = ["md", "markdown", "mdown", "mkd", "mkdn", "mdx"]
-    /// The app's own scripts run in this world; the page's scripts are disabled.
-    private static let world = WKContentWorld.world(name: "nxmd")
 
-    private let webView: SmoothWebView
+    /// Open windows. A window does not retain its controller, so they live here.
+    private static var all: [ViewerWindowController] = []
+    /// The window used most recently; newly opened files become tabs in it.
+    private static weak var current: ViewerWindowController?
+
+    private let contentHost = NSView()
     private let topBar = TopBar()
-    private let dock: Dock
+    private let tabBar = TabBar()
+    private let dock = Dock()
     private var dockBottom: NSLayoutConstraint!
     private var dockVisible = true
 
-    private var pageLoaded = false
-    private var loadedBaseURL: URL?
-    private var headings: [Heading] = []
-    private var showingSource = false
-    private var lastScrollY: Double = 0
-    private var scrollRun: Double = 0 // distance scrolled in the current direction
+    private var tabs: [DocumentTab] = []
+    private var activeIndex = -1
+    private var zoom: Double
+    private var showsTabBar = false
+
+    private var active: DocumentTab? {
+        tabs.indices.contains(activeIndex) ? tabs[activeIndex] : nil
+    }
+
+    /// The window a newly opened document joins.
+    static func forNewDocument() -> ViewerWindowController {
+        if let current, current.window?.isVisible == true || current.tabs.isEmpty {
+            return current
+        }
+        let front = NSApp.orderedWindows.lazy
+            .compactMap { $0.windowController as? ViewerWindowController }
+            .first { $0.window?.isVisible == true }
+        return front ?? ViewerWindowController()
+    }
 
     init() {
-        let window = NSWindow(
+        let window = ViewerWindow(
             contentRect: NSRect(x: 0, y: 0, width: 820, height: 940),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
@@ -38,49 +56,31 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
         window.appearance = NSAppearance(named: .darkAqua)
         window.minSize = NSSize(width: 440, height: 320)
         window.isRestorable = false
+        window.tabbingMode = .disallowed
 
-        let config = WKWebViewConfiguration()
-        config.setURLSchemeHandler(LocalFileSchemeHandler(), forURLScheme: LocalFileSchemeHandler.scheme)
-        // Markdown can contain raw HTML; never run scripts from it.
-        config.defaultWebpagePreferences.allowsContentJavaScript = false
+        let saved = UserDefaults.standard.double(forKey: Self.zoomKey)
+        zoom = saved > 0 ? saved : 1
 
-        webView = SmoothWebView(frame: .zero, configuration: config)
-        webView.setValue(false, forKey: "drawsBackground")
-        webView.allowsMagnification = true
-        let zoom = UserDefaults.standard.double(forKey: Self.zoomKey)
-        webView.pageZoom = zoom > 0 ? zoom : 1
-
-        let proxy = ScrollMessageProxy()
-        config.userContentController.add(proxy, contentWorld: Self.world, name: "scroll")
-        config.userContentController.addUserScript(WKUserScript(
-            source: Self.scrollScript, injectionTime: .atDocumentEnd,
-            forMainFrameOnly: true, in: Self.world))
-
-        dock = Dock()
         super.init(window: window)
 
-        proxy.owner = self
         window.delegate = self
-        webView.navigationDelegate = self
-        webView.uiDelegate = self
-        webView.onWheel = { [weak self] delta, point in
-            guard let self, self.pageLoaded, !Theme.reduceMotion else { return false }
-            let zoom = self.webView.pageZoom
-            self.runScript("nxmdWheel(dy, x, y)", [
-                "dy": Double(delta) * 50,
-                "x": Double(point.x) / zoom,
-                "y": Double(point.y) / zoom,
-            ])
-            return true
-        }
+        window.onTabShortcut = { [weak self] in self?.handle($0) ?? false }
         for button in [dock.outline, dock.search, dock.zoom, dock.source, dock.edit] { button.target = self }
         dock.searchField.delegate = self
         if let editor = ExternalEditor.app {
             dock.edit.toolTip = "Open in \(editor.name) (⇧⌘E)"
         }
+        tabBar.onSelect = { [weak self] in self?.select($0) }
+        tabBar.onClose = { [weak self] in self?.closeTab(at: $0, byMouse: true) }
+        tabBar.onMove = { [weak self] in self?.tabMoved(from: $0, to: $1) }
+        tabBar.alphaValue = 0
+        tabBar.isHidden = true
         updateZoomLabel()
         buildLayout(in: window)
         placeWindow(window)
+
+        Self.all.append(self)
+        Self.current = self
     }
 
     @available(*, unavailable)
@@ -91,24 +91,33 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
         container.onMouseMove = { [weak self] point in
             if point.y < 110 { self?.setDockVisible(true) }
         }
-        for view in [webView, topBar, dock] as [NSView] {
+        for view in [contentHost, topBar, tabBar, dock] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview(view)
         }
         window.contentView = container
 
         let titleBarBottom = (window.contentLayoutGuide as? NSLayoutGuide)?.topAnchor ?? container.topAnchor
+        let headerBottom = topBar.bottomAnchor.constraint(equalTo: titleBarBottom)
+        headerBottom.priority = .defaultHigh
         dockBottom = dock.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -18)
         NSLayoutConstraint.activate([
             topBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             topBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             topBar.topAnchor.constraint(equalTo: container.topAnchor),
-            topBar.bottomAnchor.constraint(equalTo: titleBarBottom),
+            headerBottom,
+            // Full screen hides the title bar; keep room for the tabs anyway.
+            topBar.heightAnchor.constraint(greaterThanOrEqualToConstant: 38),
 
-            webView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            webView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            webView.topAnchor.constraint(equalTo: topBar.bottomAnchor),
-            webView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            tabBar.leadingAnchor.constraint(equalTo: topBar.leadingAnchor),
+            tabBar.trailingAnchor.constraint(equalTo: topBar.trailingAnchor),
+            tabBar.topAnchor.constraint(equalTo: topBar.topAnchor),
+            tabBar.bottomAnchor.constraint(equalTo: topBar.bottomAnchor),
+
+            contentHost.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            contentHost.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            contentHost.topAnchor.constraint(equalTo: topBar.bottomAnchor),
+            contentHost.bottomAnchor.constraint(equalTo: container.bottomAnchor),
 
             dock.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             dockBottom,
@@ -128,155 +137,186 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
         _ = window.setFrameAutosaveName(Self.frameName)
     }
 
-    override var document: AnyObject? {
-        didSet { render() }
+    func windowDidBecomeMain(_ notification: Notification) {
+        Self.current = self
     }
-
-    private var markdownDocument: MarkdownDocument? { document as? MarkdownDocument }
 
     func windowWillClose(_ notification: Notification) {
-        webView.configuration.userContentController.removeAllScriptMessageHandlers()
+        let closing = tabs
+        tabs.removeAll()
+        activeIndex = -1
+        for tab in closing {
+            tab.teardown()
+            tab.document.close()
+        }
+        Self.all.removeAll { $0 === self }
+        if Self.current === self { Self.current = nil }
     }
 
-    // MARK: - Rendering
+    func windowWillEnterFullScreen(_ notification: Notification) { tabBar.leadingInset = 12 }
+    func windowWillExitFullScreen(_ notification: Notification) { tabBar.leadingInset = 80 }
 
-    func render() {
-        guard let doc = markdownDocument else { return }
-        topBar.title = doc.displayName
-        let body: String
-        if showingSource {
-            body = Renderer.shared.source(doc.text)
-            headings = []
-        } else {
-            let rendered = Renderer.shared.render(doc.text)
-            body = rendered.html
-            headings = rendered.headings
-        }
-        dock.outline.isEnabled = !headings.isEmpty
-        dock.source.isActive = showingSource
+    // MARK: - Tabs
 
-        let baseURL = doc.fileURL.map {
-            LocalFileSchemeHandler.baseURL(forDirectory: $0.deletingLastPathComponent())
-        }
-        if pageLoaded, baseURL == loadedBaseURL {
-            // Swap the content in place: keeps scroll position, no flash.
-            webView.callAsyncJavaScript(
-                "document.getElementById('content').innerHTML = html; nxmdReport();",
-                arguments: ["html": body], in: nil, in: Self.world
-            ) { [weak self] result in
-                if case .failure = result { self?.loadPage(body: body, baseURL: baseURL) }
-            }
-        } else {
-            loadPage(body: body, baseURL: baseURL)
-        }
+    func addTab(for document: MarkdownDocument) {
+        let tab = DocumentTab(document: document, zoom: zoom)
+        tab.host = self
+        document.tab = tab
+
+        let index = tabs.count
+        tabs.append(tab)
+        tab.webView.frame = contentHost.bounds
+        tab.webView.autoresizingMask = [.width, .height]
+        tab.webView.isHidden = true
+        contentHost.addSubview(tab.webView)
+        tabBar.insertTab(title: tab.title, tooltip: Self.tooltip(for: document),
+                         at: index, animated: showsTabBar)
+        tab.render()
+        select(index)
+        updateTabBarVisibility()
     }
 
-    private func loadPage(body: String, baseURL: URL?) {
-        pageLoaded = false
-        loadedBaseURL = baseURL
-        webView.loadHTMLString(Renderer.shared.page(body: body), baseURL: baseURL)
+    /// Brings the document's tab and its window to the front.
+    func show(_ tab: DocumentTab) {
+        if let index = tabs.firstIndex(where: { $0 === tab }) { select(index) }
+        showWindow(nil)
     }
 
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        pageLoaded = true
-    }
-
-    private func runScript(_ source: String, _ arguments: [String: Any] = [:]) {
-        webView.callAsyncJavaScript(source, arguments: arguments, in: nil, in: Self.world) { result in
-            if case .failure(let error) = result { NSLog("nxmd script error: \(error)") }
+    func select(_ index: Int) {
+        guard tabs.indices.contains(index) else { return }
+        let tab = tabs[index]
+        if let old = active, old !== tab {
+            old.findText = dock.searchField.stringValue
+            old.isSearching = dock.isSearching
+            let hadFocus = (window?.firstResponder as? NSView)?.isDescendant(of: old.webView) ?? false
+            old.webView.isHidden = true
+            if hadFocus { window?.makeFirstResponder(tab.webView) }
         }
+        activeIndex = index
+        tab.webView.isHidden = false
+
+        dock.searchField.stringValue = tab.findText
+        dock.searchField.textColor = .labelColor
+        dock.setSearching(tab.isSearching, animated: false)
+        if window?.firstResponder == nil || window?.firstResponder === window {
+            window?.makeFirstResponder(tab.webView)
+        }
+
+        tabBar.select(index)
+        showProgress(of: tab)
+        updateChrome(for: tab)
+        setDockVisible(true)
+    }
+
+    @objc func closeTab(_ sender: Any?) {
+        closeTab(at: activeIndex, byMouse: false)
+    }
+
+    private func closeTab(at index: Int, byMouse: Bool) {
+        guard tabs.indices.contains(index) else { return }
+        guard tabs.count > 1 else {
+            window?.performClose(nil)
+            return
+        }
+        let wasActive = index == activeIndex
+        let tab = tabs.remove(at: index)
+        tab.webView.removeFromSuperview()
+        tab.teardown()
+        tab.document.close()
+        tabBar.removeTab(at: index, byMouse: byMouse)
+
+        if wasActive {
+            // The tab to the right takes its place; the last one hands over to the left.
+            activeIndex = -1
+            select(min(index, tabs.count - 1))
+        } else if index < activeIndex {
+            activeIndex -= 1
+        }
+        updateTabBarVisibility()
+    }
+
+    private func tabMoved(from: Int, to: Int) {
+        let selected = active
+        tabs.insert(tabs.remove(at: from), at: to)
+        activeIndex = tabs.firstIndex { $0 === selected } ?? activeIndex
+    }
+
+    @objc func showNextTab(_ sender: Any?) {
+        guard tabs.count > 1 else { return }
+        select((activeIndex + 1) % tabs.count)
+    }
+
+    @objc func showPreviousTab(_ sender: Any?) {
+        guard tabs.count > 1 else { return }
+        select((activeIndex - 1 + tabs.count) % tabs.count)
+    }
+
+    private func handle(_ shortcut: TabShortcut) -> Bool {
+        switch shortcut {
+        case .next: showNextTab(nil)
+        case .previous: showPreviousTab(nil)
+        case .index(let index):
+            guard tabs.indices.contains(index) else { return true }
+            select(index)
+        case .last: select(tabs.count - 1)
+        }
+        return true
+    }
+
+    private func updateTabBarVisibility() {
+        let show = tabs.count > 1
+        guard show != showsTabBar else { return }
+        showsTabBar = show
+        if show { tabBar.isHidden = false }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = Theme.reduceMotion ? 0 : 0.18
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            tabBar.animator().alphaValue = show ? 1 : 0
+            topBar.animator().alphaValue = show ? 0 : 1
+        }, completionHandler: { [weak self] in
+            guard let self, !self.showsTabBar else { return }
+            self.tabBar.isHidden = true
+        })
+    }
+
+    private static func tooltip(for document: MarkdownDocument) -> String? {
+        document.fileURL.map { ($0.path as NSString).abbreviatingWithTildeInPath }
+    }
+
+    // MARK: - Tab callbacks
+
+    func tabDidRender(_ tab: DocumentTab) {
+        if let index = tabs.firstIndex(where: { $0 === tab }) {
+            tabBar.setTitle(tab.title, tooltip: Self.tooltip(for: tab.document), at: index)
+        }
+        if tab === active { updateChrome(for: tab) }
+    }
+
+    private func updateChrome(for tab: DocumentTab) {
+        topBar.title = tab.title
+        window?.title = tab.title
+        dock.outline.isEnabled = !tab.headings.isEmpty
+        dock.source.isActive = tab.showingSource
     }
 
     // MARK: - Scroll: progress line and toolbar auto-hide
 
-    private static let scrollScript = """
-    (function () {
-      var pending = false;
-      function report() {
-        pending = false;
-        var el = document.scrollingElement || document.documentElement;
-        window.webkit.messageHandlers.scroll.postMessage({ y: el.scrollTop, max: el.scrollHeight - el.clientHeight });
-      }
-      globalThis.nxmdReport = function () {
-        if (!pending) { pending = true; requestAnimationFrame(report); }
-      };
-      addEventListener('scroll', nxmdReport, { passive: true });
-      addEventListener('resize', nxmdReport);
-      nxmdReport();
-
-      // Smooth mouse-wheel scrolling: ease toward a target position.
-      var target = null, frame = 0, lastSet = null;
-      function root() { return document.scrollingElement || document.documentElement; }
-      function stop() {
-        if (frame) cancelAnimationFrame(frame);
-        target = null; frame = 0; lastSet = null;
-      }
-      function step() {
-        var el = root();
-        target = Math.max(0, Math.min(el.scrollHeight - el.clientHeight, target));
-        var diff = target - el.scrollTop;
-        if (Math.abs(diff) < 1.5) {
-          el.scrollTo({ top: target, behavior: 'instant' });
-          stop();
-          return;
-        }
-        // Ease out, but always move at least 1px so rounding can't stall it.
-        var move = Math.sign(diff) * Math.max(Math.abs(diff) * 0.2, 1);
-        var before = el.scrollTop;
-        el.scrollTo({ top: before + move, behavior: 'instant' });
-        if (el.scrollTop === before) { stop(); return; } // can't move any further
-        lastSet = el.scrollTop;
-        frame = requestAnimationFrame(step);
-      }
-      // Any scroll we didn't make (keyboard, trackpad, find, links) cancels the animation.
-      addEventListener('scroll', function () {
-        if (target !== null && lastSet !== null && Math.abs(root().scrollTop - lastSet) > 2) stop();
-      }, { passive: true });
-      globalThis.nxmdStopSmooth = stop;
-
-      // Nearest inner box under the cursor that can still scroll in this direction.
-      function innerScrollable(x, y, dy) {
-        var el = document.elementFromPoint(x, y);
-        while (el && el !== document.body && el !== document.documentElement) {
-          var overflow = getComputedStyle(el).overflowY;
-          if ((overflow === 'auto' || overflow === 'scroll') && el.scrollHeight > el.clientHeight) {
-            var canUp = el.scrollTop > 0;
-            var canDown = el.scrollTop + el.clientHeight < el.scrollHeight - 1;
-            if ((dy > 0 && canUp) || (dy < 0 && canDown)) return el;
-          }
-          el = el.parentElement;
-        }
-        return null;
-      }
-
-      globalThis.nxmdWheel = function (dy, x, y) {
-        var inner = innerScrollable(x, y, dy);
-        if (inner) { inner.scrollBy({ top: -dy, behavior: 'smooth' }); return; }
-        var el = root();
-        if (target === null) target = el.scrollTop;
-        target = Math.max(0, Math.min(el.scrollHeight - el.clientHeight, target - dy));
-        if (!frame) frame = requestAnimationFrame(step);
-      };
-    })();
-    """
-
-    fileprivate func pageScrolled(y: Double, max: Double) {
-        topBar.setProgress(max > 1 ? CGFloat(y / max) : nil)
-
-        let delta = y - lastScrollY
-        lastScrollY = y
-        if delta != 0 {
-            // Reset when the direction changes, so slow scrolls add up too.
-            scrollRun = (scrollRun >= 0) == (delta >= 0) ? scrollRun + delta : delta
-        }
+    func tabDidScroll(_ tab: DocumentTab) {
+        guard tab === active else { return }
+        showProgress(of: tab)
         guard !dock.isSearching else { return }
-        let nearTop = y < 40
-        let nearBottom = y > max - 8
-        if nearTop || nearBottom || scrollRun < -24 {
+        let nearTop = tab.scrollY < 40
+        let nearBottom = tab.scrollY > tab.scrollMax - 8
+        if nearTop || nearBottom || tab.scrollRun < -24 {
             setDockVisible(true)
-        } else if scrollRun > 24 {
+        } else if tab.scrollRun > 24 {
             setDockVisible(false)
         }
+    }
+
+    private func showProgress(of tab: DocumentTab) {
+        topBar.setProgress(tab.progress)
+        tabBar.setProgress(tab.progress)
     }
 
     private func setDockVisible(_ visible: Bool) {
@@ -299,7 +339,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
     // MARK: - Toolbar actions
 
     @objc func showOutline(_ sender: Any?) {
-        guard !headings.isEmpty else { return }
+        guard let headings = active?.headings, !headings.isEmpty else { return }
         setDockVisible(true)
         let menu = NSMenu()
         let minLevel = headings.map(\.level).min() ?? 1
@@ -315,7 +355,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
 
     @objc private func jumpToHeading(_ item: NSMenuItem) {
         guard let id = item.representedObject as? String else { return }
-        runScript("nxmdStopSmooth(); document.getElementById(id)?.scrollIntoView({ block: 'start' })", ["id": id])
+        active?.jump(toHeading: id)
     }
 
     @objc func showZoomMenu(_ sender: Any?) {
@@ -324,7 +364,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
             let item = NSMenuItem(title: "\(Int((level * 100).rounded()))%", action: #selector(pickZoom(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = level
-            item.state = abs(level - webView.pageZoom) < 0.01 ? .on : .off
+            item.state = abs(level - zoom) < 0.01 ? .on : .off
             menu.addItem(item)
         }
         popUp(menu, above: dock.zoom)
@@ -335,13 +375,15 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
     }
 
     @objc func toggleSource(_ sender: Any?) {
-        showingSource.toggle()
-        render()
-        runScript("nxmdStopSmooth(); window.scrollTo(0, 0)")
+        active?.toggleSource()
     }
 
     @objc func openInEditor(_ sender: Any?) {
-        if let url = markdownDocument?.fileURL { ExternalEditor.open(url) }
+        if let url = active?.document.fileURL { ExternalEditor.open(url) }
+    }
+
+    @objc func printDocument(_ sender: Any?) {
+        active?.document.printDocument(sender)
     }
 
     private func popUp(_ menu: NSMenu, above button: NSView) {
@@ -353,16 +395,20 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(toggleSource(_:)):
-            item.title = showingSource ? "Show Rendered" : "Show Source"
+            item.title = active?.showingSource == true ? "Show Rendered" : "Show Source"
+            return active != nil
         case #selector(showOutline(_:)):
-            return !headings.isEmpty
+            return active?.headings.isEmpty == false
         case #selector(openInEditor(_:)):
             if let editor = ExternalEditor.app { item.title = "Open in \(editor.name)" }
-            return markdownDocument?.fileURL != nil
+            return active?.document.fileURL != nil
+        case #selector(showNextTab(_:)), #selector(showPreviousTab(_:)):
+            return tabs.count > 1
+        case #selector(closeTab(_:)), #selector(printDocument(_:)):
+            return active != nil
         default:
-            break
+            return true
         }
-        return true
     }
 
     // MARK: - Find
@@ -384,21 +430,22 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
 
     private func closeFind() {
         dock.setSearching(false)
-        window?.makeFirstResponder(webView)
+        if let tab = active {
+            tab.isSearching = false
+            window?.makeFirstResponder(tab.webView)
+        }
     }
 
     private func find(backwards: Bool) {
         let field = dock.searchField
+        guard let tab = active else { return }
+        tab.findText = field.stringValue
         guard !field.stringValue.isEmpty else {
             field.textColor = .labelColor
             return
         }
-        let config = WKFindConfiguration()
-        config.backwards = backwards
-        config.wraps = true
-        config.caseSensitive = false
-        webView.find(field.stringValue, configuration: config) { result in
-            field.textColor = result.matchFound ? .labelColor : .systemRed
+        tab.find(backwards: backwards) { [weak field] found in
+            field?.textColor = found ? .labelColor : .systemRed
         }
     }
 
@@ -425,87 +472,63 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, NSMenu
 
     // MARK: - Zoom
 
-    @objc func zoomIn(_ sender: Any?) { setZoom(webView.pageZoom * 1.1) }
-    @objc func zoomOut(_ sender: Any?) { setZoom(webView.pageZoom / 1.1) }
+    @objc func zoomIn(_ sender: Any?) { setZoom(zoom * 1.1) }
+    @objc func zoomOut(_ sender: Any?) { setZoom(zoom / 1.1) }
     @objc func resetZoom(_ sender: Any?) { setZoom(1) }
 
     private func setZoom(_ value: Double) {
-        let zoom = min(max(value, 0.5), 3)
-        webView.pageZoom = zoom
+        zoom = min(max(value, 0.5), 3)
+        tabs.forEach { $0.webView.pageZoom = zoom }
         UserDefaults.standard.set(zoom, forKey: Self.zoomKey)
         updateZoomLabel()
     }
 
     private func updateZoomLabel() {
-        dock.zoom.setTitle("\(Int((webView.pageZoom * 100).rounded()))%")
-    }
-
-    // MARK: - Links
-
-    func webView(_ webView: WKWebView,
-                 decidePolicyFor action: WKNavigationAction,
-                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        guard action.navigationType == .linkActivated, let url = action.request.url else {
-            decisionHandler(.allow)
-            return
-        }
-        if url.fragment != nil, let current = webView.url, url.withoutFragment == current.withoutFragment {
-            decisionHandler(.allow) // in-page anchor
-            return
-        }
-        decisionHandler(.cancel)
-        open(url)
-    }
-
-    func webView(_ webView: WKWebView,
-                 createWebViewWith configuration: WKWebViewConfiguration,
-                 for action: WKNavigationAction,
-                 windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if let url = action.request.url { open(url) }
-        return nil
-    }
-
-    private func open(_ url: URL) {
-        guard url.scheme == LocalFileSchemeHandler.scheme else {
-            NSWorkspace.shared.open(url)
-            return
-        }
-        guard let file = LocalFileSchemeHandler.fileURL(from: url) else { return }
-        if Self.markdownExtensions.contains(file.pathExtension.lowercased()) {
-            NSDocumentController.shared.openDocument(withContentsOf: file, display: true) { _, _, _ in }
-        } else {
-            NSWorkspace.shared.open(file)
-        }
-    }
-
-    // MARK: - Print
-
-    func printOperation(printInfo: NSPrintInfo) -> NSPrintOperation {
-        let info = printInfo.copy() as! NSPrintInfo
-        info.isVerticallyCentered = false
-        info.horizontalPagination = .fit
-        let op = webView.printOperation(with: info)
-        op.view?.frame = webView.bounds
-        return op
+        dock.zoom.setTitle("\(Int((zoom * 100).rounded()))%")
     }
 }
 
-/// Breaks the retain cycle between WKUserContentController and the window controller.
-private final class ScrollMessageProxy: NSObject, WKScriptMessageHandler {
-    weak var owner: ViewerWindowController?
+// MARK: - Window
 
-    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let body = message.body as? [String: Any],
-              let y = (body["y"] as? NSNumber)?.doubleValue,
-              let max = (body["max"] as? NSNumber)?.doubleValue else { return }
-        owner?.pageScrolled(y: y, max: max)
+enum TabShortcut {
+    case next, previous, index(Int), last
+
+    private static let tabKey: UInt16 = 48
+    private static let rightBracketKey: UInt16 = 30
+    private static let leftBracketKey: UInt16 = 33
+
+    init?(_ event: NSEvent) {
+        guard event.type == .keyDown else { return nil }
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        switch (event.keyCode, modifiers) {
+        case (Self.tabKey, [.control]): self = .next
+        case (Self.tabKey, [.control, .shift]): self = .previous
+        case (Self.rightBracketKey, [.command, .shift]): self = .next
+        case (Self.leftBracketKey, [.command, .shift]): self = .previous
+        default:
+            guard modifiers == .command,
+                  let digit = event.charactersIgnoringModifiers.flatMap(Int.init),
+                  (1...9).contains(digit) else { return nil }
+            self = digit == 9 ? .last : .index(digit - 1)
+        }
     }
 }
 
-private extension URL {
-    var withoutFragment: URL {
-        var components = URLComponents(url: self, resolvingAgainstBaseURL: false)
-        components?.fragment = nil
-        return components?.url ?? self
+/// Catches tab shortcuts before the web view or the menu sees them.
+final class ViewerWindow: NSWindow {
+    var onTabShortcut: ((TabShortcut) -> Bool)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if let shortcut = TabShortcut(event), onTabShortcut?(shortcut) == true { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        // ⌃Tab never arrives as a key equivalent; it would move the focus instead.
+        if event.type == .keyDown, event.keyCode == 48, event.modifierFlags.contains(.control),
+           let shortcut = TabShortcut(event), onTabShortcut?(shortcut) == true {
+            return
+        }
+        super.sendEvent(event)
     }
 }

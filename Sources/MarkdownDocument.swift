@@ -7,6 +7,10 @@ final class MarkdownDocument: NSDocument {
     private var watcher: DispatchSourceFileSystemObject?
     private var pendingReload: DispatchWorkItem?
 
+    /// The tab showing this file. Documents live as tabs in a shared window,
+    /// so they have no window controllers of their own.
+    weak var tab: DocumentTab?
+
     override class var autosavesInPlace: Bool { false }
 
     override func read(from data: Data, ofType typeName: String) throws {
@@ -14,8 +18,16 @@ final class MarkdownDocument: NSDocument {
     }
 
     override func makeWindowControllers() {
-        addWindowController(ViewerWindowController())
+        ViewerWindowController.forNewDocument().addTab(for: self)
         startWatching()
+    }
+
+    override func showWindows() {
+        if let tab { tab.host?.show(tab) }
+    }
+
+    override var windowForSheet: NSWindow? {
+        tab?.host?.window ?? super.windowForSheet
     }
 
     override func close() {
@@ -24,28 +36,22 @@ final class MarkdownDocument: NSDocument {
     }
 
     override func printOperation(withSettings printSettings: [NSPrintInfo.AttributeKey: Any]) throws -> NSPrintOperation {
-        guard let controller = windowControllers.first as? ViewerWindowController else {
-            throw CocoaError(.featureUnsupported)
-        }
-        return controller.printOperation(printInfo: printInfo)
+        guard let tab else { throw CocoaError(.featureUnsupported) }
+        return tab.printOperation(printInfo: printInfo)
     }
 
     override func presentedItemDidMove(to newURL: URL) {
         super.presentedItemDidMove(to: newURL)
         DispatchQueue.main.async { [weak self] in
             self?.startWatching()
-            self?.viewers.forEach { $0.render() }
+            self?.tab?.render()
         }
-    }
-
-    private var viewers: [ViewerWindowController] {
-        windowControllers.compactMap { $0 as? ViewerWindowController }
     }
 
     private func update(text newText: String) {
         guard newText != text else { return }
         text = newText
-        viewers.forEach { $0.render() }
+        tab?.render()
     }
 
     // MARK: - Live reload
