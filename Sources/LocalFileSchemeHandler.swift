@@ -2,9 +2,10 @@ import Foundation
 import UniformTypeIdentifiers
 import WebKit
 
-/// Serves files next to the Markdown document (relative images, linked files)
-/// through a custom scheme, because WKWebView blocks file:// subresources
-/// for pages loaded from a string.
+/// Serves files through a custom scheme, because WKWebView blocks file://
+/// subresources for pages loaded from a string.
+/// - `nxmd-file://local/<absolute path>`: files next to the document (images, links)
+/// - `nxmd-file://app/<path>`: the app's own resources (fonts)
 final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
     static let scheme = "nxmd-file"
 
@@ -19,18 +20,23 @@ final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
         return components.url ?? URL(string: "\(scheme)://local/")!
     }
 
-    static func fileURL(from url: URL) -> URL {
-        URL(fileURLWithPath: url.path)
+    /// The file a `nxmd-file://` URL points to, or nil if it is outside the allowed roots.
+    static func fileURL(from url: URL) -> URL? {
+        if url.host == "app" {
+            guard let resources = Bundle.main.resourceURL?.standardizedFileURL else { return nil }
+            let file = resources.appendingPathComponent(url.path).standardizedFileURL
+            return file.path.hasPrefix(resources.path + "/") ? file : nil
+        }
+        return URL(fileURLWithPath: url.path)
     }
 
     func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
-        guard let url = task.request.url else {
+        guard let url = task.request.url, let file = Self.fileURL(from: url) else {
             task.didFailWithError(URLError(.badURL))
             return
         }
         let id = ObjectIdentifier(task)
         activeTasks.insert(id)
-        let file = Self.fileURL(from: url)
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = Result { try Data(contentsOf: file) }
@@ -40,9 +46,12 @@ final class LocalFileSchemeHandler: NSObject, WKURLSchemeHandler {
                 case .success(let data):
                     let mime = UTType(filenameExtension: file.pathExtension)?.preferredMIMEType
                         ?? "application/octet-stream"
-                    task.didReceive(URLResponse(url: url, mimeType: mime,
-                                                expectedContentLength: data.count,
-                                                textEncodingName: nil))
+                    // Fonts are loaded cross-origin (app -> local), so allow it explicitly.
+                    let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                                                   headerFields: ["Content-Type": mime,
+                                                                  "Content-Length": "\(data.count)",
+                                                                  "Access-Control-Allow-Origin": "*"])!
+                    task.didReceive(response)
                     task.didReceive(data)
                     task.didFinish()
                 case .failure(let error):

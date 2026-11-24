@@ -4,6 +4,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var openedFiles = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        Theme.registerFonts()
+        NSApp.appearance = NSAppearance(named: .darkAqua)
         NSApp.mainMenu = MainMenu.build()
     }
 
@@ -57,6 +59,7 @@ enum MainMenu {
             recentItem.submenu = recent
             menu.addItem(recentItem)
             menu.addItem(.separator())
+            menu.addItem("Open in Editor", #selector(ViewerWindowController.openInEditor(_:)), "e", [.command, .shift])
             menu.addItem("Close", #selector(NSWindow.performClose(_:)), "w")
             menu.addItem(.separator())
             menu.addItem("Print…", #selector(NSDocument.printDocument(_:)), "p")
@@ -72,6 +75,9 @@ enum MainMenu {
         }
 
         main.addSubmenu("View") { menu in
+            menu.addItem("Show Source", #selector(ViewerWindowController.toggleSource(_:)), "u", [.command, .option])
+            menu.addItem("Outline", #selector(ViewerWindowController.showOutline(_:)), "o", [.command, .shift])
+            menu.addItem(.separator())
             menu.addItem("Actual Size", #selector(ViewerWindowController.resetZoom(_:)), "0")
             menu.addItem("Zoom In", #selector(ViewerWindowController.zoomIn(_:)), "+")
             let zoomInAlt = menu.addItem("Zoom In", #selector(ViewerWindowController.zoomIn(_:)), "=")

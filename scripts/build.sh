@@ -22,6 +22,7 @@ lipo -create "$TMP"/nxmd-arm64 "$TMP"/nxmd-x86_64 -output "$APP/Contents/MacOS/n
 
 sed -e "s/__VERSION__/$VERSION/" -e "s/__BUILD__/$BUILD/" Resources/Info.plist > "$APP/Contents/Info.plist"
 cp Resources/*.js Resources/*.css "$APP/Contents/Resources/"
+cp -R Resources/fonts "$APP/Contents/Resources/fonts"
 
 # Icon: asset catalog (so macOS masks it to the system shape) plus a legacy .icns
 ICONSET="$TMP/Assets.xcassets/AppIcon.appiconset"
