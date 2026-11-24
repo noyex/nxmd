@@ -4,7 +4,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var openedFiles = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        _ = DocumentController() // becomes NSDocumentController.shared
         Theme.registerFonts()
+        NSWindow.allowsAutomaticWindowTabbing = false // nxmd draws its own tabs
         NSApp.appearance = NSAppearance(named: .darkAqua)
         NSApp.mainMenu = MainMenu.build()
     }
@@ -60,7 +62,8 @@ enum MainMenu {
             menu.addItem(recentItem)
             menu.addItem(.separator())
             menu.addItem("Open in Editor", #selector(ViewerWindowController.openInEditor(_:)), "e", [.command, .shift])
-            menu.addItem("Close", #selector(NSWindow.performClose(_:)), "w")
+            menu.addItem("Close Tab", #selector(ViewerWindowController.closeTab(_:)), "w")
+            menu.addItem("Close Window", #selector(NSWindow.performClose(_:)), "w", [.command, .shift])
             menu.addItem(.separator())
             menu.addItem("Print…", #selector(NSDocument.printDocument(_:)), "p")
         }
@@ -92,11 +95,29 @@ enum MainMenu {
             menu.addItem("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m")
             menu.addItem("Zoom", #selector(NSWindow.performZoom(_:)))
             menu.addItem(.separator())
+            menu.addItem("Show Previous Tab", #selector(ViewerWindowController.showPreviousTab(_:)), "[", [.command, .shift])
+            menu.addItem("Show Next Tab", #selector(ViewerWindowController.showNextTab(_:)), "]", [.command, .shift])
+            menu.addItem(.separator())
             menu.addItem("Bring All to Front", #selector(NSApplication.arrangeInFront(_:)))
         }
         NSApp.windowsMenu = window
 
         return main
+    }
+}
+
+/// Documents have no window controllers (they live as tabs), so the current
+/// document comes from the main window's active tab. The Open panel starts next to it.
+final class DocumentController: NSDocumentController {
+    override var currentDocument: NSDocument? {
+        ViewerWindowController.mainDocument ?? super.currentDocument
+    }
+}
+
+/// ⌘W closes a tab in viewer windows; panels such as About still close with it.
+extension NSPanel {
+    @objc func closeTab(_ sender: Any?) {
+        performClose(sender)
     }
 }
 
