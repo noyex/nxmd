@@ -1,3 +1,5 @@
+<img src="docs/icon.png" width="128" alt="nxmd icon">
+
 # nxmd
 
 A tiny, native Markdown viewer for macOS. Double-click a `.md` file and read it, nicely rendered.
