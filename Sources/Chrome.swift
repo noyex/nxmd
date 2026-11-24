@@ -123,10 +123,10 @@ final class Dock: NSView {
 
     var isSearching: Bool { !searchField.isHidden }
 
-    func setSearching(_ on: Bool) {
+    func setSearching(_ on: Bool, animated: Bool = true) {
         guard on != isSearching else { return }
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = Theme.reduceMotion ? 0 : 0.18
+            ctx.duration = Theme.reduceMotion || !animated ? 0 : 0.18
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             ctx.allowsImplicitAnimation = true
             searchField.isHidden = !on
@@ -171,7 +171,7 @@ final class TopBar: NSView {
         ])
         progressLayer.startPoint = CGPoint(x: 0, y: 0.5)
         progressLayer.endPoint = CGPoint(x: 1, y: 0.5)
-        progressLayer.colors = [NSColor(white: 0.6, alpha: 0).cgColor, NSColor(white: 0.6, alpha: 1).cgColor]
+        progressLayer.colors = [Theme.progress.withAlphaComponent(0).cgColor, Theme.progress.cgColor]
         progressLayer.opacity = 0
         layer?.addSublayer(progressLayer)
     }
